@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Billing</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:Arial,sans-serif;margin:0;background:#f4f6f8;color:#222}
+  header{background:#1f4e79;color:#fff;padding:12px 20px;font-size:20px}
+  .wrap{display:flex;gap:16px;padding:16px;flex-wrap:wrap}
+  .card{background:#fff;border-radius:8px;padding:14px;box-shadow:0 1px 3px #0002}
+  .left{flex:2;min-width:340px}.right{flex:1;min-width:300px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-bottom:8px}
+  th,td{padding:6px;border-bottom:1px solid #eee;text-align:left}
+  th{background:#f0f3f6}
+  input,select,button{font-size:14px;padding:7px;border:1px solid #bbb;border-radius:5px}
+  button{background:#1f4e79;color:#fff;border:0;cursor:pointer}
+  button:disabled{background:#9ab;cursor:default}
+  button.red{background:#c0392b}
+  .qty{width:64px}
+  .row{display:flex;gap:8px;margin-bottom:10px}
+  .row input{flex:1}
+  .msg{padding:8px;border-radius:5px;margin-top:10px;font-size:14px}
+  .err{background:#fdecea;color:#b71c1c}.ok{background:#e8f5e9;color:#1b5e20}
+  .tot td{font-weight:bold}
+</style>
+</head>
+<body>
+<header>Billing counter</header>
+<div class="wrap">
+  <div class="card left">
+    <div class="row">
+      <input id="q" placeholder="Search product name or SKU" autofocus>
+      <button id="searchBtn">Search</button>
+    </div>
+    <table>
+      <thead><tr><th>SKU</th><th>Product</th><th>Price</th><th>Stock</th><th>Qty</th><th></th></tr></thead>
+      <tbody id="results"></tbody>
+    </table>
+    <button id="prev">Prev</button> <span id="info"></span> <button id="next">Next</button>
+  </div>
+
+  <div class="card right">
+    <h3>Current bill</h3>
+    <table>
+      <thead><tr><th>Item</th><th>Qty</th><th>Amount</th><th></th></tr></thead>
+      <tbody id="cart"></tbody>
+    </table>
+    <table>
+      <tr><td>Subtotal</td><td id="sub">0.00</td></tr>
+      <tr><td>GST</td><td id="gst">0.00</td></tr>
+      <tr class="tot"><td>Total (preview)</td><td id="total">0.00</td></tr>
+    </table>
+    <div class="row"><input id="cname" placeholder="Customer name (optional)"></div>
+    <div class="row"><input id="cphone" placeholder="Customer phone, 10 digits (optional)"></div>
+    <div class="row">
+      <select id="pay"><option>CASH</option><option>UPI</option><option>CARD</option></select>
+      <button id="createBtn" disabled>Create bill</button>
+    </div>
+    <div id="msg"></div>
+  </div>
+</div>
+
+<script>
+let page = 0, cart = [], lastResults = [];
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money = paise => (paise / 100).toFixed(2);
+
+function showMsg(html, ok) {
+  const m = $('msg');
+  m.className = html ? 'msg ' + (ok ? 'ok' : 'err') : '';
+  m.innerHTML = html;
+}
+
+async function api(url, options) {
+  const res = await fetch(url, options);
+  if (res.status === 401) throw new Error('Login expired. Refresh the page and log in again.');
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) throw new Error((data && data.message) || ('Error ' + res.status));
+  return data;
+}
+
+async function search(pg) {
+  page = Math.max(pg, 0);
+  try {
+    const d = await api('/api/search/products?size=10&page=' + page +
+                        '&q=' + encodeURIComponent($('q').value));
+    lastResults = d.content;
+    $('results').innerHTML = d.content.map((p, i) => `<tr>
+      <td>${esc(p.sku)}</td><td>${esc(p.name)}</td><td>${p.price.toFixed(2)}</td><td>${p.stock}</td>
+      <td><input class="qty" type="number" min="1" max="${p.stock}" value="1" id="qty${i}"></td>
+      <td><button ${p.stock < 1 ? 'disabled' : ''} onclick="addToBill(${i})">Add</button></td></tr>`
+    ).join('') || '<tr><td colspan="6">No products found</td></tr>';
+    $('info').textContent = 'Page ' + (d.page + 1) + ' of ' + Math.max(d.totalPages, 1) +
+                            ' (' + d.totalElements + ' products)';
+    $('prev').disabled = d.page === 0;
+    $('next').disabled = d.last;
+  } catch (e) { showMsg(esc(e.message), false); }
+}
+
+function addToBill(i) {
+  const p = lastResults[i];
+  const q = parseInt($('qty' + i).value, 10);
+  if (!q || q < 1) return showMsg('Enter a quantity of 1 or more', false);
+  const item = cart.find(c => c.id === p.id);
+  const total = (item ? item.qty : 0) + q;
+  if (total > p.stock) return showMsg('Only ' + p.stock + ' in stock for ' + esc(p.name), false);
+  if (item) { item.qty = total; item.stock = p.stock; }
+  else cart.push({id: p.id, name: p.name, price: p.price, gst: p.gstPercent, stock: p.stock, qty: q});
+  showMsg('', true);
+  renderCart();
+}
+
+function setQty(i, v) {
+  const q = parseInt(v, 10);
+  if (!q || q < 1) cart[i].qty = 1;
+  else if (q > cart[i].stock) {
+    cart[i].qty = cart[i].stock;
+    showMsg('Only ' + cart[i].stock + ' in stock for ' + esc(cart[i].name), false);
+  } else cart[i].qty = q;
+  renderCart();
+}
+
+function removeItem(i) { cart.splice(i, 1); renderCart(); }
+
+function renderCart() {
+  let sub = 0, gst = 0;
+  $('cart').innerHTML = cart.map((c, i) => {
+    const line = Math.round(c.price * 100) * c.qty;
+    sub += line;
+    gst += Math.round(line * c.gst / 100);
+    return `<tr><td>${esc(c.name)}</td>
+      <td><input class="qty" type="number" min="1" max="${c.stock}" value="${c.qty}"
+           onchange="setQty(${i}, this.value)"></td>
+      <td>${money(line)}</td>
+      <td><button class="red" onclick="removeItem(${i})">x</button></td></tr>`;
+  }).join('') || '<tr><td colspan="4">No items yet</td></tr>';
+  $('sub').textContent = money(sub);
+  $('gst').textContent = money(gst);
+  $('total').textContent = money(sub + gst);
+  $('createBtn').disabled = cart.length === 0;
+}
+
+async function createBill() {
+  const body = {
+    paymentMode: $('pay').value,
+    items: cart.map(c => ({productId: c.id, quantity: c.qty}))
+  };
+  const name = $('cname').value.trim(), phone = $('cphone').value.trim();
+  if (name) body.customerName = name;
+  if (phone) body.customerPhone = phone;
+  $('createBtn').disabled = true;
+  try {
+    const bill = await api('/api/bills', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    cart = [];
+    renderCart();
+    $('cname').value = '';
+    $('cphone').value = '';
+    showMsg('Bill ' + esc(bill.billNumber) + ' created. Total Rs. ' + bill.totalAmount.toFixed(2) +
+            ' &nbsp; <a href="/api/bills/' + bill.id + '/pdf" target="_blank">Open PDF</a>', true);
+    search(page);
+  } catch (e) {
+    showMsg(esc(e.message), false);
+    $('createBtn').disabled = false;
+  }
+}
+
+$('searchBtn').onclick = () => search(0);
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') search(0); });
+$('prev').onclick = () => search(page - 1);
+$('next').onclick = () => search(page + 1);
+$('createBtn').onclick = createBill;
+renderCart();
+search(0);
+</script>
+</body>
+</html>
